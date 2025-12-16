@@ -1,0 +1,263 @@
+<!doctype html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <title>WebRTC Viewer</title>
+        <style>
+            body {
+                font-family: sans-serif;
+                margin: 16px;
+            }
+            video {
+                width: 100%;
+                max-width: 900px;
+                background: #000;
+            }
+            input {
+                width: 520px;
+            }
+            .row {
+                margin: 8px 0;
+            }
+            pre {
+                background: #111;
+                color: #ddd;
+                padding: 10px;
+                overflow: auto;
+                max-width: 900px;
+            }
+        </style>
+    </head>
+    <body>
+        <h2>WebRTC Viewer</h2>
+
+        <div class="row">
+            Signaling WS/WSS URL:
+            <input id="wsUrl" value="ws://13.56.253.215:3000" />
+        </div>
+        <div class="row">
+            Token: <input id="token" value="supersecret123" />
+        </div>
+        <div class="row">Room: <input id="room" value="testroom" /></div>
+
+        <div class="row">
+            <button id="connectBtn">Connect</button>
+            <button id="hangupBtn" disabled>Hang up</button>
+        </div>
+
+        <video id="video" autoplay playsinline muted controls></video>
+
+        <h3>Log</h3>
+        <pre id="log"></pre>
+
+        <script>
+            (() => {
+                const logEl = document.getElementById("log");
+                const videoEl = document.getElementById("video");
+
+                let ws = null;
+                let pc = null;
+                let pendingIce = [];
+                let statsTimer = null;
+
+                function log(...args) {
+                    const line = args
+                        .map((a) =>
+                            typeof a === "string" ? a : JSON.stringify(a),
+                        )
+                        .join(" ");
+                    console.log(line);
+                    logEl.textContent += line + "\n";
+                    logEl.scrollTop = logEl.scrollHeight;
+                }
+
+                function send(type, roomId, payload) {
+                    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+                    ws.send(JSON.stringify({ type, roomId, payload }));
+                }
+
+                function roomId() {
+                    return document.getElementById("room").value.trim();
+                }
+
+                function stopStats() {
+                    if (statsTimer) {
+                        clearInterval(statsTimer);
+                        statsTimer = null;
+                    }
+                }
+
+                async function startStats() {
+                    stopStats();
+                    statsTimer = setInterval(async () => {
+                        if (!pc) return;
+                        const stats = await pc.getStats();
+                        let inbound = null;
+                        stats.forEach((r) => {
+                            if (r.type === "inbound-rtp" && r.kind === "video")
+                                inbound = r;
+                        });
+                        if (inbound) {
+                            log(
+                                "inbound video bytesReceived=",
+                                inbound.bytesReceived,
+                                "packetsReceived=",
+                                inbound.packetsReceived,
+                            );
+                        }
+                    }, 1000);
+                }
+
+                function hangup() {
+                    stopStats();
+                    try {
+                        if (pc) pc.close();
+                    } catch {}
+                    try {
+                        if (ws) ws.close();
+                    } catch {}
+                    pc = null;
+                    ws = null;
+                    pendingIce = [];
+                    videoEl.srcObject = null;
+                    document.getElementById("hangupBtn").disabled = true;
+                    log("Hung up");
+                }
+
+                async function makePeerConnection() {
+                    pc = new RTCPeerConnection({
+                        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+                    });
+
+                    pc.onconnectionstatechange = () =>
+                        log("pc.connectionState =", pc.connectionState);
+                    pc.oniceconnectionstatechange = () =>
+                        log("pc.iceConnectionState =", pc.iceConnectionState);
+                    pc.onicegatheringstatechange = () =>
+                        log("pc.iceGatheringState =", pc.iceGatheringState);
+
+                    pc.onicecandidate = (e) => {
+                        if (!e.candidate) return;
+                        send("ice-candidate", roomId(), {
+                            candidate: e.candidate.candidate,
+                            sdpMLineIndex: e.candidate.sdpMLineIndex,
+                            sdpMid: e.candidate.sdpMid,
+                        });
+                    };
+
+                    pc.ontrack = async (e) => {
+                        log(
+                            "Got remote track:",
+                            e.track.kind,
+                            "id=",
+                            e.track.id,
+                        );
+                        if (e.track.kind === "video") {
+                            const stream =
+                                e.streams && e.streams[0]
+                                    ? e.streams[0]
+                                    : new MediaStream([e.track]);
+                            videoEl.srcObject = stream;
+                            try {
+                                await videoEl.play();
+                                log("video.play() ok");
+                            } catch (err) {
+                                log("video.play() blocked:", err.toString());
+                            }
+                            startStats();
+                        }
+                    };
+
+                    pc.addTransceiver("video", { direction: "recvonly" });
+
+                    const offer = await pc.createOffer();
+                    await pc.setLocalDescription(offer);
+                    send("offer", roomId(), {
+                        sdp: pc.localDescription.sdp,
+                        sdpType: "offer",
+                    });
+                    log("Sent OFFER");
+                }
+
+                async function handleAnswer(sdp) {
+                    await pc.setRemoteDescription({ type: "answer", sdp });
+                    log("Set remote ANSWER");
+
+                    for (const c of pendingIce) {
+                        try {
+                            await pc.addIceCandidate(c);
+                        } catch (e) {
+                            log("addIceCandidate failed:", e.toString());
+                        }
+                    }
+                    pendingIce = [];
+                }
+
+                async function handleRemoteIce(payload) {
+                    const c = {
+                        candidate: payload.candidate,
+                        sdpMLineIndex: payload.sdpMLineIndex,
+                        sdpMid: payload.sdpMid,
+                    };
+                    if (!pc || !pc.remoteDescription) {
+                        pendingIce.push(c);
+                        return;
+                    }
+                    await pc.addIceCandidate(c);
+                }
+
+                async function connect() {
+                    // don’t stack multiple PCs/WS
+                    if (pc || ws) hangup();
+
+                    const wsUrl = document.getElementById("wsUrl").value.trim();
+                    const token = document.getElementById("token").value.trim();
+
+                    ws = new WebSocket(wsUrl);
+
+                    ws.onopen = () => {
+                        log("WS connected");
+                        send("auth", null, { token });
+                    };
+
+                    ws.onmessage = async (ev) => {
+                        let msg;
+                        try {
+                            msg = JSON.parse(ev.data);
+                        } catch {
+                            return;
+                        }
+                        const { type, payload } = msg;
+
+                        if (type === "auth-ok") {
+                            log("Auth OK, joining room");
+                            send("join", roomId(), {});
+                            await makePeerConnection();
+                            document.getElementById("hangupBtn").disabled =
+                                false;
+                            return;
+                        }
+
+                        if (type === "answer") {
+                            log("Got ANSWER");
+                            await handleAnswer(payload.sdp);
+                            return;
+                        }
+
+                        if (type === "ice-candidate") {
+                            await handleRemoteIce(payload);
+                            return;
+                        }
+                    };
+
+                    ws.onclose = (e) =>
+                        log("WS closed code=", e.code, "reason=", e.reason);
+                    ws.onerror = (e) => log("WS error", e.toString());
+                }
+
+                document.getElementById("connectBtn").onclick = connect;
+                document.getElementById("hangupBtn").onclick = hangup;
+            })();
+        </script>
+    </body>
+</html>

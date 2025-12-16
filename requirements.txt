@@ -1,0 +1,5 @@
+websockets>=11.0
+PyGObject>=3.42
+
+
+
