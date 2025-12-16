@@ -240,10 +240,67 @@ python3 webrtc_streamer.py \
 - The viewer uses `recvonly` transceiver direction (receives video only)
 - The streamer uses `sendonly` transceiver direction (sends video only)
 
+## WebRTC Receiver
+
+The `webrtc_reciever.py` is a Python-based receiver that can run on any Linux system (not just Jetson) to receive and test the video stream.
+
+### Receiver Requirements
+
+The receiver can run on **any Linux system** (Ubuntu, Debian, etc.) - it does not require NVIDIA hardware.
+
+**Installation (Ubuntu/Debian):**
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  python3-gi \
+  gir1.2-gst-plugins-bad-1.0 \
+  gstreamer1.0-tools \
+  gstreamer1.0-plugins-base \
+  gstreamer1.0-plugins-good \
+  gstreamer1.0-plugins-bad \
+  gstreamer1.0-plugins-ugly \
+  gstreamer1.0-libav
+
+pip3 install websockets
+```
+
+Or install Python dependencies from requirements.txt:
+
+```bash
+pip3 install -r requirements.txt
+```
+
+**Usage:**
+
+```bash
+python3 webrtc_reciever.py \
+  --ws wss://your-signaling-server.com \
+  --token YOUR_SHARED_SECRET \
+  --room YOUR_ROOM_ID
+```
+
+The receiver will:
+- Connect to the signaling server and authenticate
+- Join the specified room
+- Create a WebRTC offer (recvonly)
+- Receive H.264 video stream from the Jetson device
+- Display FPS statistics (access units per second)
+
+**Optional TURN server:**
+
+```bash
+python3 webrtc_reciever.py \
+  --ws wss://your-signaling-server.com \
+  --token YOUR_SHARED_SECRET \
+  --room YOUR_ROOM_ID \
+  --turn turn://user:pass@turn-server.com:3478?transport=udp
+```
+
 ## Files
 
 - `webrtc_streamer.py` - Main streaming application for Jetson Orin
-- `webrtc_reciever.py` - WebRTC receiver implementation
+- `webrtc_reciever.py` - WebRTC receiver implementation (runs on any Linux)
 - `viewer.html` - Web-based viewer for testing
 - `requirements.txt` - Python dependencies
 
