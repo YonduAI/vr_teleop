@@ -184,6 +184,62 @@ Key features:
 - **H.264 Baseline Profile**: Ensures maximum compatibility
 - **Zero-latency RTP**: Optimized for real-time streaming
 
+## Web Browser Viewer
+
+The included `viewer.html` provides a web-based client to receive and display the video stream from your Jetson device.
+
+### Using the Web Viewer
+
+1. **Start the streamer on your Jetson device** (in answerer mode - default):
+```bash
+python3 webrtc_streamer.py \
+  --ws wss://your-signaling-server.com \
+  --token YOUR_SHARED_SECRET \
+  --room YOUR_ROOM_ID
+```
+
+2. **Open the viewer in a web browser**:
+   - Option A: Open `viewer.html` directly in your browser (file:// protocol)
+   - Option B: Serve it via a web server:
+     ```bash
+     # Using Python's built-in server
+     python3 -m http.server 8000
+     # Then open http://localhost:8000/viewer.html
+     ```
+
+3. **Configure the viewer**:
+   - Enter your signaling server URL (e.g., `wss://your-signaling-server.com`)
+   - Enter your authentication token
+   - Enter the room ID (must match the room ID used by the streamer)
+
+4. **Connect**:
+   - Click the "Connect" button
+   - The viewer will authenticate, join the room, and create a WebRTC offer
+   - The Jetson device will respond with an answer and start streaming
+   - Video should appear in the browser
+
+### Viewer Features
+
+- **Real-time video playback**: Displays the H.264 video stream from the Jetson device
+- **Connection status**: Shows WebRTC connection state and ICE gathering status
+- **Statistics**: Displays inbound video statistics (bytes received, packets received)
+- **Logging**: Real-time log of connection events and errors
+
+### Typical Workflow
+
+1. **Jetson device** (sender): Runs `webrtc_streamer.py` in answerer mode (default)
+2. **Web browser** (receiver): Opens `viewer.html` and creates an offer
+3. **Signaling server**: Relays the offer to Jetson, which responds with an answer
+4. **WebRTC connection**: Established, video streams from Jetson to browser
+
+### Notes
+
+- The viewer acts as the **offerer** (creates the offer)
+- The Jetson streamer acts as the **answerer** (responds with answer)
+- Both must use the same signaling server URL, token, and room ID
+- The viewer uses `recvonly` transceiver direction (receives video only)
+- The streamer uses `sendonly` transceiver direction (sends video only)
+
 ## Files
 
 - `webrtc_streamer.py` - Main streaming application for Jetson Orin
