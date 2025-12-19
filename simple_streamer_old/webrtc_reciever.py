@@ -37,10 +37,21 @@ log = logging.getLogger("webrtc-rx")
 
 
 class SignalingClient:
-    def __init__(self, ws_url: str, token: str, room_id: str, on_ready, on_message):
+    def __init__(
+        self,
+        ws_url: str,
+        token: str,
+        room_id: str,
+        role: str,
+        name: str,
+        on_ready,
+        on_message,
+    ):
         self.ws_url = ws_url
         self.token = token
         self.room_id = room_id
+        self.role = role
+        self.name = name
         self.on_ready = on_ready  # thread-safe callable()
         self.on_message = on_message  # thread-safe callable(dict)
 
@@ -102,9 +113,15 @@ class SignalingClient:
 
             # join
             await ws.send(
-                json.dumps({"type": "join", "roomId": self.room_id, "payload": {}})
+                json.dumps(
+                    {
+                        "type": "join",
+                        "roomId": self.room_id,
+                        "payload": {"role": self.role, "name": self.name},
+                    }
+                )
             )
-            log.info("Joined room: %s", self.room_id)
+            log.info("Joined room: %s (role=%s name=%s)", self.room_id, self.role, self.name)
 
             # notify app
             try:
@@ -154,6 +171,9 @@ class WebRTCReceiver:
 
         self._remote_desc_set = False
         self._pending_remote_ice: List[Dict[str, Any]] = []
+        self._peers: Dict[str, Dict[str, str]] = {}
+        self._client_id: Optional[str] = None
+        self._target_client_id: Optional[str] = args.target
 
         # FPS measurement
         self._au_count = 0
@@ -163,6 +183,8 @@ class WebRTCReceiver:
             ws_url=args.ws,
             token=args.token,
             room_id=args.room,
+            role=args.role,
+            name=args.name,
             on_ready=self._on_signaling_ready_threadsafe,
             on_message=self._on_signaling_message_threadsafe,
         )
@@ -267,10 +289,23 @@ class WebRTCReceiver:
 
     def _on_negotiation_needed(self, element):
         log.info("Negotiation-needed: creating OFFER (recvonly H264)")
-        promise = Gst.Promise.new_with_change_func(
-            self._on_offer_created, element, None
+        self._create_and_send_offer("negotiation-needed")
+
+    def _create_and_send_offer(self, reason: str):
+        if not self.webrtc:
+            log.info("Offer requested (%s) but pipeline not ready yet", reason)
+            return
+        self._remote_desc_set = False
+        self._pending_remote_ice.clear()
+        log.info(
+            "Creating OFFER (%s) target=%s",
+            reason,
+            self._target_client_id or "broadcast",
         )
-        element.emit("create-offer", None, promise)
+        promise = Gst.Promise.new_with_change_func(
+            self._on_offer_created, self.webrtc, None
+        )
+        self.webrtc.emit("create-offer", None, promise)
 
     def _on_offer_created(self, promise: Gst.Promise, element, _user_data):
         reply = promise.get_reply()
@@ -278,23 +313,25 @@ class WebRTCReceiver:
         element.emit("set-local-description", offer, None)
 
         sdp_text = offer.sdp.as_text()
-        self.signaling.send(
-            {
-                "type": "offer",
-                "roomId": self.args.room,
-                "payload": {"sdp": sdp_text, "sdpType": "offer"},
-            }
-        )
+        envelope: Dict[str, Any] = {
+            "type": "offer",
+            "roomId": self.args.room,
+            "payload": {"sdp": sdp_text, "sdpType": "offer"},
+        }
+        if self._target_client_id:
+            envelope["to"] = self._target_client_id
+        self.signaling.send(envelope)
         log.info("Sent OFFER (%d bytes)", len(sdp_text))
 
     def _on_ice_candidate(self, element, mlineindex: int, candidate: str):
-        self.signaling.send(
-            {
-                "type": "ice-candidate",
-                "roomId": self.args.room,
-                "payload": {"candidate": candidate, "sdpMLineIndex": int(mlineindex)},
-            }
-        )
+        envelope: Dict[str, Any] = {
+            "type": "ice-candidate",
+            "roomId": self.args.room,
+            "payload": {"candidate": candidate, "sdpMLineIndex": int(mlineindex)},
+        }
+        if self._target_client_id:
+            envelope["to"] = self._target_client_id
+        self.signaling.send(envelope)
 
     def _on_incoming_pad(self, element, pad: Gst.Pad):
         caps = pad.get_current_caps() or pad.query_caps(None)
@@ -341,7 +378,7 @@ class WebRTCReceiver:
         if pad.link(sinkpad) != Gst.PadLinkReturn.OK:
             log.error("Failed to link webrtc src pad -> display chain")
 
-    def _on_h264_handoff(self, identity, buffer):
+    def _on_h264_handoff(self, identity, buffer, pad=None):
         self._au_count += 1
 
     def _on_conn_state(self, *args):
@@ -374,13 +411,66 @@ class WebRTCReceiver:
         if not self.webrtc:
             return False
 
+        if mtype == "joined":
+            self._client_id = payload.get("clientId") or payload.get("client_id")
+            peers = payload.get("peers") or []
+            self._update_peers_from_list(peers, reason="joined")
+            return False
+
+        if mtype == "peer-list":
+            peers = payload.get("peers") or []
+            self._update_peers_from_list(peers, reason="peer-list")
+            return False
+
+        if mtype == "peer-joined":
+            cid = payload.get("clientId")
+            if cid:
+                self._peers[str(cid)] = {
+                    "role": str(payload.get("role") or ""),
+                    "name": str(payload.get("name") or ""),
+                }
+                self._maybe_pick_target("peer-joined")
+                log.info(
+                    "Peer joined: %s role=%s name=%s",
+                    cid,
+                    payload.get("role"),
+                    payload.get("name"),
+                )
+            return False
+
+        if mtype == "peer-left":
+            cid = payload.get("clientId")
+            if cid and str(cid) in self._peers:
+                self._peers.pop(str(cid), None)
+                if self._target_client_id == str(cid):
+                    log.info("Target peer left (%s); clearing target", cid)
+                    self._target_client_id = None
+                self._maybe_pick_target("peer-left")
+            return False
+
+        if mtype in ("warn", "error"):
+            log.warning("Server %s: %s", mtype, payload)
+            return False
+
         if mtype == "answer":
+            sender = msg.get("from")
+            if self._target_client_id and sender and sender != self._target_client_id:
+                log.info("Ignoring ANSWER from non-target peer: %s", sender)
+                return False
+            if not self._target_client_id and sender:
+                self._target_client_id = str(sender)
             sdp = payload.get("sdp")
             if sdp:
                 self._set_remote_sdp(str(sdp), "answer")
             return False
 
         if mtype == "ice-candidate":
+            sender = msg.get("from")
+            if self._target_client_id and sender and sender != self._target_client_id:
+                log.info("Ignoring ICE from non-target peer: %s", sender)
+                return False
+            if not self._target_client_id and sender:
+                self._target_client_id = str(sender)
             cand = payload.get("candidate")
             idx = payload.get("sdpMLineIndex")
             if cand is not None and idx is not None:
@@ -406,7 +496,7 @@ class WebRTCReceiver:
         )
         self.webrtc.emit("set-remote-description", desc, None)
         self._remote_desc_set = True
-        log.info("Set remote ANSWER")
+        log.info("Set remote ANSWER from %s", self._target_client_id or "unknown peer")
 
         for item in self._pending_remote_ice:
             self.webrtc.emit("add-ice-candidate", item["mline"], item["cand"])
@@ -418,6 +508,62 @@ class WebRTCReceiver:
             self._pending_remote_ice.append({"mline": mline, "cand": cand})
             return
         self.webrtc.emit("add-ice-candidate", mline, cand)
+
+    # --------- peer tracking ---------
+
+    def _update_peers_from_list(self, peers: List[Dict[str, Any]], reason: str):
+        new_map: Dict[str, Dict[str, str]] = {}
+        for peer in peers:
+            cid = peer.get("clientId")
+            if not cid:
+                continue
+            cid = str(cid)
+            new_map[cid] = {
+                "role": str(peer.get("role") or ""),
+                "name": str(peer.get("name") or ""),
+            }
+        self._peers = new_map
+        log.info(
+            "Peer list updated (%s): %s",
+            reason,
+            {k: v.get("role") for k, v in self._peers.items()},
+        )
+        self._maybe_pick_target(reason)
+
+    def _maybe_pick_target(self, reason: str):
+        if self.args.target:
+            # explicit override; keep whatever user passed
+            self._target_client_id = self.args.target
+            return
+
+        target_name = (self.args.target_name or "").lower()
+        target_role = (self.args.target_role or "").lower()
+
+        # prefer name match
+        candidate = None
+        for cid, info in self._peers.items():
+            if target_name and (info.get("name") or "").lower() == target_name:
+                candidate = cid
+                break
+        if candidate is None:
+            for cid, info in self._peers.items():
+                if (info.get("role") or "").lower() == target_role:
+                    candidate = cid
+                    break
+
+        if candidate and candidate != self._target_client_id:
+            self._target_client_id = candidate
+            log.info(
+                "Target peer set to %s (role=%s name=%s) [%s]",
+                candidate,
+                self._peers[candidate].get("role"),
+                self._peers[candidate].get("name"),
+                reason,
+            )
+            self._create_and_send_offer(f"target {candidate}")
+        elif not candidate and self._target_client_id and self._target_client_id not in self._peers:
+            log.info("Clearing target peer (no %s present)", target_role or "robot")
+            self._target_client_id = None
 
     # --------- bus ---------
 
@@ -449,16 +595,38 @@ class WebRTCReceiver:
 
 
 def parse_args():
+    return build_arg_parser().parse_args()
+
+
+def build_arg_parser(require_all: bool = True) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser()
-    p.add_argument("--ws", required=True)
-    p.add_argument("--token", required=True)
-    p.add_argument("--room", required=True)
+    req = {"required": require_all}
+    p.add_argument("--ws", **req)
+    p.add_argument("--token", **req)
+    p.add_argument("--room", **req)
+    p.add_argument("--role", default="viewer", help="role announced to signaling server")
+    p.add_argument("--name", default="python-viewer", help="name announced to signaling server")
+    p.add_argument(
+        "--target-role",
+        default="robot",
+        help="preferred peer role to target for signaling (auto-selected if present)",
+    )
+    p.add_argument(
+        "--target-name",
+        default="orin",
+        help="preferred peer name to target for signaling (matched before role)",
+    )
+    p.add_argument(
+        "--target",
+        default=None,
+        help="explicit clientId to target (skips auto role selection)",
+    )
     p.add_argument("--stun", default="stun://stun.l.google.com:19302")
     p.add_argument(
         "--turn", default="", help="turn(s)://user:pass@host:port?transport=udp"
     )
     p.add_argument("--verbose", action="store_true")
-    return p.parse_args()
+    return p
 
 
 def main():
