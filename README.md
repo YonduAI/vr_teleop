@@ -9,7 +9,7 @@ A complete WebRTC-based teleoperation system for robots using NVIDIA Jetson AGX 
 - **Bidirectional control plane**: Send and receive control commands via WebSocket signaling
 - **Role-based routing**: Signaling server routes messages based on client roles (robot, controller, viewer)
 - **Lazy pipeline**: Video pipeline starts only when a viewer connects
-- **Library-based architecture**: Reusable `robot_webrtc_lib.py` for easy integration
+- **Library-based architecture**: Reusable Python libs under `teleop_core/` for easy integration
 - **Multiple viewers**: Support for multiple viewers with automatic retargeting
 
 ## Architecture
@@ -109,7 +109,7 @@ This will:
 On any Linux machine:
 
 ```bash
-python3 webrtc_reciever_v2.py
+python3 video_receiver_cli.py
 ```
 
 This will:
@@ -147,7 +147,7 @@ This will print all incoming control messages.
 `robot_stream_video.py` - Main robot video streaming script
 
 ```python
-from robot_webrtc_lib import RobotWebRTCConfig, RobotWebRTCNode
+from teleop_core.video_sender import RobotWebRTCConfig, RobotWebRTCNode
 
 cfg = RobotWebRTCConfig(
     ws_url="ws://your-server:3000",
@@ -176,7 +176,7 @@ node.start()
 `robot_print_commands.py` - Example control message receiver
 
 ```python
-from robot_webrtc_lib import RobotWebRTCConfig, RobotWebRTCNode
+from teleop_core.video_sender import RobotWebRTCConfig, RobotWebRTCNode
 
 cfg = RobotWebRTCConfig(
     ws_url="ws://your-server:3000",
@@ -217,10 +217,10 @@ python3 send_random_control.py \
 
 ### Video Receiver
 
-`webrtc_reciever_v2.py` - CLI video receiver
+`video_receiver_cli.py` - CLI video receiver
 
 ```bash
-python3 webrtc_reciever_v2.py \
+python3 video_receiver_cli.py \
   --ws ws://your-server:3000 \
   --token your-token \
   --room room-id \
@@ -371,12 +371,15 @@ Configuration dataclass for robot nodes.
 ### Main Scripts
 - `robot_stream_video.py` - Robot video streaming (uses library)
 - `robot_print_commands.py` - Robot control command receiver example
-- `webrtc_reciever_v2.py` - CLI video receiver for Linux
+- `video_receiver_cli.py` - CLI video receiver for Linux
 - `send_control_tutorial.py` - Minimal one-shot control sender tutorial
 - `send_random_control.py` - Control stress sender (rate/count/duration)
 
-### Library
-- `robot_webrtc_lib.py` - Shared robot WebRTC/signaling/pipeline library
+### Library (teleop_core/)
+- `video_sender.py` - Shared robot WebRTC/signaling/pipeline (RobotWebRTCConfig/RobotWebRTCNode)
+- `video_receiver.py` - Python video receiver wrapper (supports frame callback via appsink) backed by `video_receiver_core.py`
+- `command_sender.py` - Controller helpers to auth/join and send control (target by name/role/clientId)
+- `command_receiver.py` - Control-only receiver wrapper (no video)
 
 ### Server
 - `signaling-server/server.js` - WebSocket signaling server (Node.js)

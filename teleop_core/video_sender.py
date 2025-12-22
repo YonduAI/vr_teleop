@@ -40,6 +40,10 @@ from gi.repository import Gst, GstSdp, GstWebRTC, GLib  # type: ignore
 
 log = logging.getLogger("robot-webrtc")
 
+# Aliases for clearer naming
+VideoSenderConfig = RobotWebRTCConfig
+VideoSender = RobotWebRTCNode
+
 
 @dataclass
 class RobotWebRTCConfig:

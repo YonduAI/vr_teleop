@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-CLI receiver that targets the new signaling layout used by robot_webrtc_lib/robot_stream_video.
+CLI video receiver that targets the signaling layout used by robot_stream_video (teleop_core.video_sender).
 
-- Announces itself as role=viewer by default so the signaling server can route offers to the robot.
+- Announces itself as role=viewer so the signaling server can route offers to the robot.
 - Auto-selects the first peer with role=robot (or a specific --target clientId) and re-offers when that changes.
 - Defaults match robot_stream_video.py (ws/token/room) but can be overridden with flags.
 """
@@ -14,7 +14,7 @@ import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst  # type: ignore
 
-from simple_streamer_old.webrtc_reciever import WebRTCReceiver, build_arg_parser
+from teleop_core.video_receiver_core import WebRTCReceiver, build_arg_parser
 
 
 DEFAULT_WS = "ws://13.56.253.215:3000"

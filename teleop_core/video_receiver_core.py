@@ -174,6 +174,7 @@ class WebRTCReceiver:
         self._peers: Dict[str, Dict[str, str]] = {}
         self._client_id: Optional[str] = None
         self._target_client_id: Optional[str] = args.target
+        self._on_frame = getattr(args, "on_frame", None)
 
         # FPS measurement
         self._au_count = 0
@@ -351,26 +352,56 @@ class WebRTCReceiver:
         counter.set_property("signal-handoffs", True)
         counter.connect("handoff", self._on_h264_handoff)
 
-        dec = self._make("avdec_h264", None)
-        conv = self._make("videoconvert", None)
+        elements = [q, depay, parse, counter]
 
-        sink = self._make("fpsdisplaysink", None)
-        sink.set_property("sync", False)
-        sink.set_property("text-overlay", True)
+        # If a frame callback is provided, tee into appsink instead of displaying.
+        appsink = None
+        if callable(self._on_frame):
+            dec = self._make("avdec_h264", None)
+            conv = self._make("videoconvert", None)
+            appsink = self._make("appsink", None)
+            appsink.set_property("emit-signals", True)
+            appsink.set_property("sync", False)
+            if appsink.find_property("max-buffers") is not None:
+                appsink.set_property("max-buffers", 1)
+            if appsink.find_property("drop") is not None:
+                appsink.set_property("drop", True)
+            appsink.connect("new-sample", self._on_new_sample)
+            elements += [dec, conv, appsink]
+        else:
+            dec = self._make("avdec_h264", None)
+            conv = self._make("videoconvert", None)
+            sink = self._make("fpsdisplaysink", None)
+            sink.set_property("sync", False)
+            sink.set_property("text-overlay", True)
+            elements += [dec, conv, sink]
 
         assert self.pipeline is not None
-        for e in [q, depay, parse, counter, dec, conv, sink]:
+        for e in elements:
             self.pipeline.add(e)
             e.sync_state_with_parent()
 
-        if not (
-            q.link(depay)
-            and depay.link(parse)
-            and parse.link(counter)
-            and counter.link(dec)
-            and dec.link(conv)
-            and conv.link(sink)
-        ):
+        # Link after elements are added to the pipeline
+        if callable(self._on_frame):
+            link_ok = (
+                q.link(depay)
+                and depay.link(parse)
+                and parse.link(counter)
+                and counter.link(dec)
+                and dec.link(conv)
+                and conv.link(appsink)
+            )
+        else:
+            link_ok = (
+                q.link(depay)
+                and depay.link(parse)
+                and parse.link(counter)
+                and counter.link(dec)
+                and dec.link(conv)
+                and conv.link(sink)
+            )
+
+        if not link_ok:
             log.error("Failed to link display chain")
             return
 
@@ -380,6 +411,27 @@ class WebRTCReceiver:
 
     def _on_h264_handoff(self, identity, buffer, pad=None):
         self._au_count += 1
+
+    def _on_new_sample(self, sink):
+        if not callable(self._on_frame):
+            return Gst.FlowReturn.OK
+        sample = sink.emit("pull-sample")
+        if not sample:
+            return Gst.FlowReturn.ERROR
+        buf = sample.get_buffer()
+        if not buf:
+            return Gst.FlowReturn.ERROR
+        success, mapinfo = buf.map(Gst.MapFlags.READ)
+        if not success:
+            return Gst.FlowReturn.ERROR
+        try:
+            try:
+                self._on_frame(mapinfo.data, sample)
+            except Exception:
+                log.exception("Frame handler failed")
+        finally:
+            buf.unmap(mapinfo)
+        return Gst.FlowReturn.OK
 
     def _on_conn_state(self, *args):
         if self.webrtc:
@@ -641,3 +693,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# Alias for clarity
+VideoReceiver = WebRTCReceiver
