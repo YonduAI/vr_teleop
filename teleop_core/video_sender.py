@@ -40,11 +40,6 @@ from gi.repository import Gst, GstSdp, GstWebRTC, GLib  # type: ignore
 
 log = logging.getLogger("robot-webrtc")
 
-# Aliases for clearer naming
-VideoSenderConfig = RobotWebRTCConfig
-VideoSender = RobotWebRTCNode
-
-
 @dataclass
 class RobotWebRTCConfig:
     ws_url: str
@@ -684,3 +679,8 @@ class RobotWebRTCNode:
             log.warning("GStreamer EOS")
             self._stop_pipeline()
         return True
+
+
+# Aliases for clearer naming
+VideoSenderConfig = RobotWebRTCConfig
+VideoSender = RobotWebRTCNode

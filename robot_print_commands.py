@@ -16,7 +16,7 @@ def parse_args():
     p.add_argument("--room", default="testroom")
     p.add_argument("--role", default="robot")
     p.add_argument("--name", default="orin-cmd")
-    p.add_argument("--verbose", action="true", help=argparse.SUPPRESS)
+    p.add_argument("--verbose", action="store_true", help=argparse.SUPPRESS)
     return p.parse_args()
 
 
